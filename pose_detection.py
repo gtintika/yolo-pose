@@ -27,7 +27,7 @@ import numpy as np
 import math
 from typing import Tuple, Optional, List, Dict
 
-DEBUG = False  # Set to True to enable detailed debug prints
+DEBUG = True  # Set to True to enable detailed debug prints
 KEYPOINT_CONF_THRESHOLD = 0.5  # Minimum confidence for keypoint validity
 
 class MotionAnalyzer:
@@ -110,14 +110,39 @@ class MotionAnalyzer:
         return angle
     
     @staticmethod
+    def _detect_facing_camera(keypoints: List[Dict]) -> bool:
+        """
+        Detect if person is facing the camera using face keypoints.
+
+        Returns:
+            True if facing camera, False if facing away
+        """
+        left_eye = next((kpt for kpt in keypoints if kpt['name'] == 'left_eye'), None)
+        right_eye = next((kpt for kpt in keypoints if kpt['name'] == 'right_eye'), None)
+
+        # If both eyes are confident, use eye ordering
+        if (left_eye and right_eye and
+            left_eye['confidence'] >= KEYPOINT_CONF_THRESHOLD and
+            right_eye['confidence'] >= KEYPOINT_CONF_THRESHOLD):
+            # Facing camera: anatomical left eye appears on right side of image (higher x)
+            return left_eye['x'] > right_eye['x']
+
+        # Fallback: check nose visibility
+        nose = next((kpt for kpt in keypoints if kpt['name'] == 'nose'), None)
+        if nose and nose['confidence'] >= KEYPOINT_CONF_THRESHOLD:
+            return True
+
+        return False
+
+    @staticmethod
     def analyze_arm_abduction(keypoints: List[Dict], side: str = 'right') -> Tuple[str, float, Optional[float]]:
         """
         Analyze arm abduction (raising arm to the side)
-        
+
         Args:
             keypoints: List of keypoint dictionaries for one person
             side: 'right' or 'left'
-            
+
         Returns:
             Tuple of (action_name, normalized_value, angle_degrees)
             - action_name: e.g., "right arm - abduction"
@@ -138,14 +163,23 @@ class MotionAnalyzer:
         if not all([shoulder, wrist, hip]):
             return (f"{side} arm - abduction", 0.0, None)
 
+        # Detect facing direction to determine lateral check orientation
+        facing_camera = MotionAnalyzer._detect_facing_camera(keypoints)
+
         # Check arm is extending laterally (not crossing body)
-        # Right arm: elbow & wrist should be to the right of shoulder (greater x)
-        # Left arm: elbow & wrist should be to the left of shoulder (lesser x)
+        # When facing away: right arm extends to higher x, left arm to lower x
+        # When facing camera: right arm extends to lower x, left arm to higher x
         if elbow and elbow['confidence'] >= KEYPOINT_CONF_THRESHOLD:
-            if side == 'right' and (elbow['x'] < shoulder['x'] or wrist['x'] < shoulder['x']):
-                return (f"{side} arm - abduction", 0.0, None)
-            if side == 'left' and (elbow['x'] > shoulder['x'] or wrist['x'] > shoulder['x']):
-                return (f"{side} arm - abduction", 0.0, None)
+            if facing_camera:
+                if side == 'right' and (elbow['x'] > shoulder['x'] or wrist['x'] > shoulder['x']):
+                    return (f"{side} arm - abduction", 0.0, None)
+                if side == 'left' and (elbow['x'] < shoulder['x'] or wrist['x'] < shoulder['x']):
+                    return (f"{side} arm - abduction", 0.0, None)
+            else:
+                if side == 'right' and (elbow['x'] < shoulder['x'] or wrist['x'] < shoulder['x']):
+                    return (f"{side} arm - abduction", 0.0, None)
+                if side == 'left' and (elbow['x'] > shoulder['x'] or wrist['x'] > shoulder['x']):
+                    return (f"{side} arm - abduction", 0.0, None)
 
         # Calculate angle with vertical body axis
         angle = MotionAnalyzer.calculate_vertical_angle(shoulder, wrist, hip)
@@ -466,7 +500,7 @@ class PoseDetector:
                 # Add frame info
                 info_text = f"Frame: {frame_count} | Persons: {len(keypoints_list)}"
                 cv2.putText(annotated_frame, info_text, (10, height - 10),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
                 
                 # Write frame
                 if writer:
