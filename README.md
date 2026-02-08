@@ -5,6 +5,13 @@ YOLO26 pose detection with automatic duplicate person filtering and motion analy
 ## Installation
 
 ```bash
+
+# choose project location
+mkdir -p ~/projects;cd ~/projects
+# clone repository
+git clone https://github.com/gtintika/yolo-pose.git
+
+# prepare uv environment
 uv sync
 source .venv/bin/activate
 
