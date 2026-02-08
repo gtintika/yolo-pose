@@ -9,15 +9,17 @@ YOLO26 pose detection with automatic duplicate person filtering and motion analy
 python pose_detection.py --source video.mp4
 
 # With motion analysis (headless, save output)
-python pose_detection.py --source video.mp4 --no-show --output output.mp4 \
-    --analyze '{right_arm_abduction,left_arm_abduction,right_elbow_flexion,left_elbow_flexion}'
+python pose_detection.py --source abduction_2.mp4 --output abduction_2_annotated.mp4 --no-show  --analyze '{right_arm_abduction,left_arm_abduction,right_elbow_flexion,left_elbow_flexion,right_knee_flexion,left_knee_flexion}'
 
 # Use specific device
-python pose_detection.py --source video.mp4 --device mps
+python pose_detection.py --source video.mp4 --device cpu
 
 # Webcam
 python pose_detection.py --source 0
 ```
+
+
+
 
 ## CLI Reference
 
@@ -103,3 +105,4 @@ frame = cv2.imread('image.jpg')
 annotated_frame, keypoints_list = detector.detect_pose(frame)
 print(f"Detected {len(keypoints_list)} unique person(s)")
 ```
+
