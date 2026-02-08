@@ -4,6 +4,8 @@ YOLO26 pose detection with automatic duplicate person filtering and motion analy
 
 ## Installation
 
+At Linux / macOS terminal application, run:
+
 ```bash
 
 # choose project location
