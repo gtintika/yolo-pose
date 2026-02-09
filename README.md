@@ -13,6 +13,8 @@ mkdir -p ~/projects;cd ~/projects
 # clone repository
 git clone https://github.com/gtintika/yolo-pose.git
 
+cd yolo-pose
+
 # prepare uv environment
 uv sync
 source .venv/bin/activate
