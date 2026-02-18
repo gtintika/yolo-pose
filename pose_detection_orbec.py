@@ -52,6 +52,7 @@ def _annotate_motions(
     detector: CleanPoseDetector,
     analyze_motions: Optional[List[str]],
     frame_count: int,
+    entity_label: str = 'Person',
 ) -> int:
     """Draw motion analysis text on frame. Returns the final y_offset."""
     y_offset = 30
@@ -62,13 +63,13 @@ def _annotate_motions(
                 if DEBUG:
                     if angle is not None:
                         print(
-                            f"Frame {frame_count} - Person {person_id + 1} - "
+                            f"Frame {frame_count} - {entity_label} {person_id + 1} - "
                             f"{action}: {normalized:.2f} (angle: {angle:.0f}deg)"
                         )
                     else:
-                        print(f"Frame {frame_count} - Person {person_id + 1} - {action}: N/A")
+                        print(f"Frame {frame_count} - {entity_label} {person_id + 1} - {action}: N/A")
                 if angle is not None:
-                    text = f"P{person_id + 1} {action}: {normalized:.2f}"
+                    text = f"{entity_label[0]}{person_id + 1} {action}: {normalized:.2f}"
                     cv2.putText(
                         annotated_frame,
                         text,
@@ -125,10 +126,10 @@ def _draw_wrist_coords(
     return y_offset
 
 
-def _add_info_text(frame: np.ndarray, frame_count: int, num_persons: int) -> None:
+def _add_info_text(frame: np.ndarray, frame_count: int, num_persons: int, entity_label: str = 'Person') -> None:
     """Add frame info text at the bottom of the frame."""
     height = frame.shape[0]
-    info_text = f"Frame: {frame_count} | Persons: {num_persons}"
+    info_text = f"Frame: {frame_count} | {entity_label}s: {num_persons}"
     cv2.putText(
         frame,
         info_text,
@@ -172,6 +173,7 @@ def _draw_show_points(
     width: int,
     height: int,
     frame_count: int = 0,
+    entity_label: str = 'Person',
 ) -> None:
     """Overlay keypoint x,y coordinates on frame (max 3 keypoints)."""
     colors = [(0, 0, 139), (139, 0, 0), (0, 100, 0)]
@@ -180,10 +182,10 @@ def _draw_show_points(
             kpt = next((k for k in keypoints if k['name'] == kpt_name), None)
             if kpt and kpt['confidence'] >= KEYPOINT_CONF_THRESHOLD:
                 if DEBUG:
-                    print(f"Frame {frame_count} - Person {person_id+1} - {kpt_name}: x={kpt['x']:.3f}, y={kpt['y']:.3f}, conf={kpt['confidence']:.2f}")
+                    print(f"Frame {frame_count} - {entity_label} {person_id+1} - {kpt_name}: x={kpt['x']:.3f}, y={kpt['y']:.3f}, conf={kpt['confidence']:.2f}")
                 px = int(kpt['x'] * width)
                 py = int(kpt['y'] * height)
-                label = f"P{person_id+1} {kpt_name}: ({kpt['x']:.3f}, {kpt['y']:.3f})"
+                label = f"{entity_label[0]}{person_id+1} {kpt_name}: ({kpt['x']:.3f}, {kpt['y']:.3f})"
                 cv2.putText(annotated_frame, label, (px + 8, py),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
                 cv2.circle(annotated_frame, (px, py), 5, color, -1)
@@ -241,11 +243,11 @@ def process_camera_stream(
             inference_time = time.perf_counter() - frame_start
             inference_times.append(inference_time)
 
-            y_off = _annotate_motions(annotated_frame, keypoints_list, detector, analyze_motions, frame_count)
+            y_off = _annotate_motions(annotated_frame, keypoints_list, detector, analyze_motions, frame_count, detector.entity_label)
             _draw_wrist_coords(annotated_frame, keypoints_list, depth_frame if ok_depth else None, y_off)
             if show_points:
-                _draw_show_points(annotated_frame, keypoints_list, show_points, width, height, frame_count)
-            _add_info_text(annotated_frame, frame_count, len(keypoints_list))
+                _draw_show_points(annotated_frame, keypoints_list, show_points, width, height, frame_count, detector.entity_label)
+            _add_info_text(annotated_frame, frame_count, len(keypoints_list), detector.entity_label)
 
             if writer:
                 writer.write(annotated_frame)
@@ -341,11 +343,11 @@ def process_file_stream(
                 # Color file + depth file: pose on color, colormap on depth
                 annotated_frame, keypoints_list = detector.detect_pose(frame, normalize_coords=True)
                 inference_times.append(time.perf_counter() - frame_start)
-                y_off = _annotate_motions(annotated_frame, keypoints_list, detector, analyze_motions, frame_count)
+                y_off = _annotate_motions(annotated_frame, keypoints_list, detector, analyze_motions, frame_count, detector.entity_label)
                 _draw_wrist_coords(annotated_frame, keypoints_list, depth_frame, y_off)
                 if show_points:
-                    _draw_show_points(annotated_frame, keypoints_list, show_points, width, height, frame_count)
-                _add_info_text(annotated_frame, frame_count, len(keypoints_list))
+                    _draw_show_points(annotated_frame, keypoints_list, show_points, width, height, frame_count, detector.entity_label)
+                _add_info_text(annotated_frame, frame_count, len(keypoints_list), detector.entity_label)
                 depth_vis = depth_to_colormap(depth_frame, (width, height))
                 display = np.hstack((annotated_frame, depth_vis))
             elif stream_type == "depth":
@@ -356,11 +358,11 @@ def process_file_stream(
                 # Color file only: pose detection (no depth available)
                 annotated_frame, keypoints_list = detector.detect_pose(frame, normalize_coords=True)
                 inference_times.append(time.perf_counter() - frame_start)
-                y_off = _annotate_motions(annotated_frame, keypoints_list, detector, analyze_motions, frame_count)
+                y_off = _annotate_motions(annotated_frame, keypoints_list, detector, analyze_motions, frame_count, detector.entity_label)
                 _draw_wrist_coords(annotated_frame, keypoints_list, None, y_off)
                 if show_points:
-                    _draw_show_points(annotated_frame, keypoints_list, show_points, width, height, frame_count)
-                _add_info_text(annotated_frame, frame_count, len(keypoints_list))
+                    _draw_show_points(annotated_frame, keypoints_list, show_points, width, height, frame_count, detector.entity_label)
+                _add_info_text(annotated_frame, frame_count, len(keypoints_list), detector.entity_label)
                 display = annotated_frame
 
             if writer:
