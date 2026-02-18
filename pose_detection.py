@@ -327,8 +327,9 @@ def _draw_show_points(
     height: int,
     frame_count: int = 0,
     entity_label: str = 'Person',
+    depth_frame: Optional[np.ndarray] = None,
 ) -> None:
-    """Overlay keypoint x,y coordinates on frame (max 3 keypoints)."""
+    """Overlay keypoint x,y (and z if depth_frame provided) coordinates on frame (max 3 keypoints)."""
     colors = [(0, 0, 139), (139, 0, 0), (0, 100, 0)]
     for person_id, keypoints in enumerate(keypoints_list):
         for color, kpt_name in zip(colors, show_points[:3]):
@@ -338,7 +339,18 @@ def _draw_show_points(
                     print(f"Frame {frame_count} - {entity_label} {person_id+1} - {kpt_name}: x={kpt['x']:.3f}, y={kpt['y']:.3f}, conf={kpt['confidence']:.2f}")
                 px = int(kpt['x'] * width)
                 py = int(kpt['y'] * height)
-                label = f"{entity_label[0]}{person_id+1} {kpt_name}: ({kpt['x']:.3f}, {kpt['y']:.3f})"
+                z_str = ""
+                if depth_frame is not None:
+                    dh, dw = depth_frame.shape[:2] if len(depth_frame.shape) >= 2 else (0, 0)
+                    if dh > 0 and dw > 0:
+                        dx = min(max(int(kpt['x'] * dw), 0), dw - 1)
+                        dy = min(max(int(kpt['y'] * dh), 0), dh - 1)
+                        raw = depth_frame[dy, dx]
+                        if len(depth_frame.shape) == 3:
+                            raw = raw[0]
+                        z_val = int(raw)
+                        z_str = f" z={z_val}mm" if z_val > 0 else " z=N/A"
+                label = f"{entity_label[0]}{person_id+1} {kpt_name}: ({kpt['x']:.3f}, {kpt['y']:.3f}{z_str})"
                 cv2.putText(annotated_frame, label, (px + 8, py),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
                 cv2.circle(annotated_frame, (px, py), 5, color, -1)
@@ -861,66 +873,78 @@ class CleanPoseDetector(PoseDetector):
         return annotated_frame, keypoints_list
 
 
-def main():
-    import argparse
-    
-    parser = argparse.ArgumentParser(description='Pose Detection with Duplicate Removal')
-    parser.add_argument('--source', type=str, required=True,
-                       help='Video file path or camera index')
-    parser.add_argument('--model', type=str, default='yolo26m-pose.pt',
-                       help='YOLO model name')
-    parser.add_argument('--conf', type=float, default=0.5,
-                       help='Confidence threshold')
-    parser.add_argument('--output', type=str, default=None,
-                       help='Output video path')
-    parser.add_argument('--no-show', action='store_true',
-                       help='Do not display video')
-    parser.add_argument('--analyze', type=str, default='',
-                       help='Motions to analyze as comma-separated names in braces. '
-                            'Available: right_arm_abduction, left_arm_abduction, '
-                            'right_elbow_flexion, left_elbow_flexion, '
-                            'right_knee_flexion, left_knee_flexion, '
-                            'right_hand_raise, left_hand_raise. '
-                            'Example: {right_arm_abduction,left_hand_raise}')
+_ANALYZE_HELP = (
+    'Motions to analyze as comma-separated names in braces. '
+    'Available: right_arm_abduction, left_arm_abduction, '
+    'right_elbow_flexion, left_elbow_flexion, '
+    'right_knee_flexion, left_knee_flexion, '
+    'right_hand_raise, left_hand_raise. '
+    'Example: {right_arm_abduction,left_hand_raise}'
+)
+
+
+def parse_analyze_arg(raw: str) -> Optional[List[str]]:
+    if not raw:
+        return None
+    motions = [m.strip() for m in raw.strip('{}').split(',') if m.strip()]
+    return motions or None
+
+
+def parse_show_points(raw: str) -> Optional[List[str]]:
+    if not raw:
+        return None
+    points = [p.strip() for p in raw.strip('{}').split(',') if p.strip()][:3]
+    return points or None
+
+
+def build_base_parser() -> argparse.ArgumentParser:
+    """Shared argument parser for common flags. Use as parent in each script's parser."""
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument('--model', type=str, default='yolo26m-pose.pt', help='YOLO model name')
+    parser.add_argument('--conf', type=float, default=0.5, help='Confidence threshold')
+    parser.add_argument('--output', type=str, default=None, help='Output video path')
+    parser.add_argument('--no-show', action='store_true', help='Do not display video')
+    parser.add_argument('--analyze', type=str, default='', help=_ANALYZE_HELP)
     parser.add_argument('--show-points', type=str, default='',
-                       help='Keypoint names to overlay x,y on frame (max 3), e.g., {wrist,thumb_tip,index_tip}')
+                        help='Keypoint names to overlay x,y on frame (max 3), e.g., {left_wrist,right_wrist}')
     parser.add_argument('--device', type=str, default=None,
-                       help='Device for inference: cpu, mps, cuda, or cuda:0 (default: auto)')
+                        help='Device for inference: cpu, mps, cuda, or cuda:0 (default: auto)')
     parser.add_argument('--keep-duplicates', action='store_true',
-                       help='Keep duplicate detections (disable filtering)')
+                        help='Keep duplicate detections (disable filtering)')
     parser.add_argument('--duplicate-threshold', type=float, default=0.7,
-                       help='Keypoint similarity threshold for duplicates (0-1, lower = more aggressive)')
-    
-    args = parser.parse_args()
-    
-    # Initialize detector
-    detector = CleanPoseDetector(
+                        help='Keypoint similarity threshold for duplicates (0-1, lower = more aggressive)')
+    return parser
+
+
+def build_detector(args) -> 'CleanPoseDetector':
+    """Construct a CleanPoseDetector from parsed args."""
+    return CleanPoseDetector(
         model_name=args.model,
         conf_threshold=args.conf,
         remove_duplicates=not args.keep_duplicates,
         duplicate_threshold=args.duplicate_threshold,
-        device=args.device
+        device=args.device,
     )
-    
-    # Process video
-    source = int(args.source) if args.source.isdigit() else args.source
-    
-    analyze_motions = None
-    if args.analyze:
-        cleaned = args.analyze.strip('{}')
-        analyze_motions = [m.strip() for m in cleaned.split(',') if m.strip()]
 
-    show_points = None
-    if args.show_points:
-        cleaned = args.show_points.strip('{}')
-        show_points = [p.strip() for p in cleaned.split(',') if p.strip()][:3]
+
+def main():
+    parser = argparse.ArgumentParser(
+        description='Pose Detection with Duplicate Removal',
+        parents=[build_base_parser()],
+    )
+    parser.add_argument('--source', type=str, required=True,
+                        help='Video file path or camera index')
+    args = parser.parse_args()
+
+    detector = build_detector(args)
+    source = int(args.source) if args.source.isdigit() else args.source
 
     detector.process_media(
         source=source,
         output_path=args.output,
         show=not args.no_show,
-        analyze_motions=analyze_motions,
-        show_points=show_points
+        analyze_motions=parse_analyze_arg(args.analyze),
+        show_points=parse_show_points(args.show_points),
     )
 
 
