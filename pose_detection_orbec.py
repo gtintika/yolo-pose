@@ -5,7 +5,7 @@ from typing import List, Optional
 import cv2
 import numpy as np
 
-from pose_detection import CleanPoseDetector, DEBUG
+from pose_detection import CleanPoseDetector, DEBUG, KEYPOINT_CONF_THRESHOLD
 
 
 def parse_analyze_arg(analyze: str) -> Optional[List[str]]:
@@ -165,12 +165,37 @@ def _create_writer(
     return writer
 
 
+def _draw_show_points(
+    annotated_frame: np.ndarray,
+    keypoints_list: list,
+    show_points: List[str],
+    width: int,
+    height: int,
+    frame_count: int = 0,
+) -> None:
+    """Overlay keypoint x,y coordinates on frame (max 3 keypoints)."""
+    colors = [(0, 0, 139), (139, 0, 0), (0, 100, 0)]
+    for person_id, keypoints in enumerate(keypoints_list):
+        for color, kpt_name in zip(colors, show_points[:3]):
+            kpt = next((k for k in keypoints if k['name'] == kpt_name), None)
+            if kpt and kpt['confidence'] >= KEYPOINT_CONF_THRESHOLD:
+                if DEBUG:
+                    print(f"Frame {frame_count} - Person {person_id+1} - {kpt_name}: x={kpt['x']:.3f}, y={kpt['y']:.3f}, conf={kpt['confidence']:.2f}")
+                px = int(kpt['x'] * width)
+                py = int(kpt['y'] * height)
+                label = f"P{person_id+1} {kpt_name}: ({kpt['x']:.3f}, {kpt['y']:.3f})"
+                cv2.putText(annotated_frame, label, (px + 8, py),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+                cv2.circle(annotated_frame, (px, py), 5, color, -1)
+
+
 def process_camera_stream(
     detector: CleanPoseDetector,
     camera_index: int = 0,
     output_path: Optional[str] = None,
     show: bool = True,
     analyze_motions: Optional[List[str]] = None,
+    show_points: Optional[List[str]] = None,
 ) -> None:
     """Process live Orbbec camera with color + depth side-by-side."""
     cap = cv2.VideoCapture(camera_index, cv2.CAP_OBSENSOR)
@@ -218,6 +243,8 @@ def process_camera_stream(
 
             y_off = _annotate_motions(annotated_frame, keypoints_list, detector, analyze_motions, frame_count)
             _draw_wrist_coords(annotated_frame, keypoints_list, depth_frame if ok_depth else None, y_off)
+            if show_points:
+                _draw_show_points(annotated_frame, keypoints_list, show_points, width, height, frame_count)
             _add_info_text(annotated_frame, frame_count, len(keypoints_list))
 
             if writer:
@@ -261,6 +288,7 @@ def process_file_stream(
     output_path: Optional[str] = None,
     show: bool = True,
     analyze_motions: Optional[List[str]] = None,
+    show_points: Optional[List[str]] = None,
 ) -> None:
     """Process video file(s). Supports color, depth, or side-by-side modes."""
     cap = cv2.VideoCapture(source)
@@ -315,6 +343,8 @@ def process_file_stream(
                 inference_times.append(time.perf_counter() - frame_start)
                 y_off = _annotate_motions(annotated_frame, keypoints_list, detector, analyze_motions, frame_count)
                 _draw_wrist_coords(annotated_frame, keypoints_list, depth_frame, y_off)
+                if show_points:
+                    _draw_show_points(annotated_frame, keypoints_list, show_points, width, height, frame_count)
                 _add_info_text(annotated_frame, frame_count, len(keypoints_list))
                 depth_vis = depth_to_colormap(depth_frame, (width, height))
                 display = np.hstack((annotated_frame, depth_vis))
@@ -328,6 +358,8 @@ def process_file_stream(
                 inference_times.append(time.perf_counter() - frame_start)
                 y_off = _annotate_motions(annotated_frame, keypoints_list, detector, analyze_motions, frame_count)
                 _draw_wrist_coords(annotated_frame, keypoints_list, None, y_off)
+                if show_points:
+                    _draw_show_points(annotated_frame, keypoints_list, show_points, width, height, frame_count)
                 _add_info_text(annotated_frame, frame_count, len(keypoints_list))
                 display = annotated_frame
 
@@ -390,7 +422,18 @@ def main() -> None:
         "--analyze",
         type=str,
         default="",
-        help="Motions to analyze, e.g., {right_arm_abduction,left_arm_abduction}",
+        help="Motions to analyze as comma-separated names in braces. "
+             "Available: right_arm_abduction, left_arm_abduction, "
+             "right_elbow_flexion, left_elbow_flexion, "
+             "right_knee_flexion, left_knee_flexion, "
+             "right_hand_raise, left_hand_raise. "
+             "Example: {right_arm_abduction,left_hand_raise}",
+    )
+    parser.add_argument(
+        "--show-points",
+        type=str,
+        default="",
+        help="Keypoint names to overlay x,y on frame (max 3), e.g., {left_wrist,right_wrist}",
     )
     parser.add_argument(
         "--device",
@@ -422,6 +465,11 @@ def main() -> None:
 
     analyze_motions = parse_analyze_arg(args.analyze)
 
+    show_points = None
+    if args.show_points:
+        cleaned = args.show_points.strip('{}')
+        show_points = [p.strip() for p in cleaned.split(',') if p.strip()][:3]
+
     if args.source == "camera":
         process_camera_stream(
             detector=detector,
@@ -429,6 +477,7 @@ def main() -> None:
             output_path=args.output,
             show=not args.no_show,
             analyze_motions=analyze_motions,
+            show_points=show_points,
         )
     else:
         process_file_stream(
@@ -439,6 +488,7 @@ def main() -> None:
             output_path=args.output,
             show=not args.no_show,
             analyze_motions=analyze_motions,
+            show_points=show_points,
         )
 
 

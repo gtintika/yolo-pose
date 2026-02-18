@@ -262,6 +262,106 @@ class MotionAnalyzer:
         
         return (f"{side} knee - flexion", normalized, angle)
 
+    @staticmethod
+    def analyze_hand_raise(keypoints: List[Dict], side: str = 'right') -> Tuple[str, float, Optional[float]]:
+        """
+        Analyze hand raise by comparing wrist and hip vertical positions.
+
+        Returns:
+            Tuple of (action_name, normalized_value, y_diff)
+            - y_diff: hip.y - wrist.y (positive = hand above hip, negative = hand below)
+            - normalized_value: clamped to [0.0, 1.0], 0.0 = hand at/below hip, 1.0 = hand fully raised
+        """
+        wrist_name = f'{side}_wrist'
+        hip_name = f'{side}_hip'
+
+        wrist = next((kpt for kpt in keypoints if kpt['name'] == wrist_name), None)
+        hip = next((kpt for kpt in keypoints if kpt['name'] == hip_name), None)
+
+        if not wrist or not hip:
+            return (f"{side} hand - raise", 0.0, None)
+        if wrist['confidence'] < KEYPOINT_CONF_THRESHOLD or hip['confidence'] < KEYPOINT_CONF_THRESHOLD:
+            return (f"{side} hand - raise", 0.0, None)
+
+        # y increases downward; hand raised → wrist.y < hip.y → diff > 0
+        y_diff = hip['y'] - wrist['y']
+        normalized = max(0.0, min(1.0, y_diff / 0.44))
+
+        return (f"{side} hand - raise", normalized, y_diff)
+
+
+def _annotate_motions(
+    annotated_frame: np.ndarray,
+    keypoints_list: list,
+    detector,
+    analyze_motions: Optional[List[str]],
+    frame_count: int,
+) -> int:
+    """Draw motion analysis text on frame. Returns the final y_offset."""
+    y_offset = 30
+    for person_id, keypoints in enumerate(keypoints_list):
+        if analyze_motions:
+            for motion_type in analyze_motions:
+                action, normalized, angle = detector.analyze_motion(keypoints, motion_type)
+                if DEBUG:
+                    print(
+                        f"Frame {frame_count} - Person {person_id + 1} - "
+                        f"{action}: {normalized:.2f} (angle: {angle:.0f}°)"
+                        if angle is not None
+                        else f"Frame {frame_count} - Person {person_id + 1} - {action}: N/A"
+                    )
+                if angle is not None:
+                    text = f"P{person_id+1} {action}: {normalized:.2f}"
+                    cv2.putText(annotated_frame, text, (10, y_offset),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                    y_offset += 25
+    return y_offset
+
+
+def _draw_show_points(
+    annotated_frame: np.ndarray,
+    keypoints_list: list,
+    show_points: List[str],
+    width: int,
+    height: int,
+    frame_count: int = 0,
+) -> None:
+    """Overlay keypoint x,y coordinates on frame (max 3 keypoints)."""
+    colors = [(0, 0, 139), (139, 0, 0), (0, 100, 0)]
+    for person_id, keypoints in enumerate(keypoints_list):
+        for color, kpt_name in zip(colors, show_points[:3]):
+            kpt = next((k for k in keypoints if k['name'] == kpt_name), None)
+            if kpt and kpt['confidence'] >= KEYPOINT_CONF_THRESHOLD:
+                if DEBUG:
+                    print(f"Frame {frame_count} - Person {person_id+1} - {kpt_name}: x={kpt['x']:.3f}, y={kpt['y']:.3f}, conf={kpt['confidence']:.2f}")
+                px = int(kpt['x'] * width)
+                py = int(kpt['y'] * height)
+                label = f"P{person_id+1} {kpt_name}: ({kpt['x']:.3f}, {kpt['y']:.3f})"
+                cv2.putText(annotated_frame, label, (px + 8, py),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+                cv2.circle(annotated_frame, (px, py), 5, color, -1)
+
+
+def _add_info_text(frame: np.ndarray, frame_count: int, num_persons: int) -> None:
+    """Add frame info text at the bottom of the frame."""
+    height = frame.shape[0]
+    info_text = f"Frame: {frame_count} | Persons: {num_persons}"
+    cv2.putText(frame, info_text, (10, height - 10),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+
+
+def _print_stats(frame_count: int, inference_times: list, processing_times: list) -> None:
+    if frame_count > 0:
+        avg_inference = sum(inference_times) / len(inference_times) * 1000
+        avg_processing = sum(processing_times) / len(processing_times) * 1000
+        total_time = sum(processing_times)
+        print(f"\n--- Stats ---")
+        print(f"Frames processed: {frame_count}")
+        print(f"Avg inference:    {avg_inference:.1f} ms/frame")
+        print(f"Avg processing:   {avg_processing:.1f} ms/frame (inference + annotation + I/O)")
+        print(f"Throughput:       {frame_count / total_time:.1f} FPS")
+        print(f"Total time:       {total_time:.2f} s")
+
 
 class PoseDetector:
     def __init__(self, model_name='yolo26m-pose.pt', conf_threshold=0.5, device=None):
@@ -279,13 +379,27 @@ class PoseDetector:
         self.device = device
         self.motion_analyzer = MotionAnalyzer()
         
-        # COCO keypoint indices (17 keypoints)
-        self.keypoint_names = [
+        _COCO_KEYPOINT_NAMES = [
             'nose', 'left_eye', 'right_eye', 'left_ear', 'right_ear',
             'left_shoulder', 'right_shoulder', 'left_elbow', 'right_elbow',
             'left_wrist', 'right_wrist', 'left_hip', 'right_hip',
             'left_knee', 'right_knee', 'left_ankle', 'right_ankle'
         ]
+        _HAND_KEYPOINT_NAMES = [
+            'wrist',
+            'thumb_cmc', 'thumb_mcp', 'thumb_ip', 'thumb_tip',
+            'index_mcp', 'index_pip', 'index_dip', 'index_tip',
+            'middle_mcp', 'middle_pip', 'middle_dip', 'middle_tip',
+            'ring_mcp', 'ring_pip', 'ring_dip', 'ring_tip',
+            'pinky_mcp', 'pinky_pip', 'pinky_dip', 'pinky_tip',
+        ]
+        num_kpts = self.model.model.kpt_shape[0] if hasattr(self.model.model, 'kpt_shape') else 17
+        if num_kpts == 17:
+            self.keypoint_names = _COCO_KEYPOINT_NAMES
+        elif num_kpts == 21:
+            self.keypoint_names = _HAND_KEYPOINT_NAMES
+        else:
+            self.keypoint_names = [f'kp_{i}' for i in range(num_kpts)]
     
     def detect_pose(self, frame: np.ndarray, normalize_coords: bool = True) -> Tuple[np.ndarray, List[List[Dict]]]:
         """
@@ -363,6 +477,7 @@ class PoseDetector:
                 - 'right_arm_abduction', 'left_arm_abduction'
                 - 'right_elbow_flexion', 'left_elbow_flexion'
                 - 'right_knee_flexion', 'left_knee_flexion'
+                - 'right_hand_raise', 'left_hand_raise'
         
         Returns:
             Tuple of (action_name, normalized_value, optional_angle)
@@ -375,6 +490,8 @@ class PoseDetector:
             'left_elbow_flexion': lambda: self.motion_analyzer.analyze_elbow_flexion(keypoints, 'left'),
             'right_knee_flexion': lambda: self.motion_analyzer.analyze_knee_flexion(keypoints, 'right'),
             'left_knee_flexion': lambda: self.motion_analyzer.analyze_knee_flexion(keypoints, 'left'),
+            'right_hand_raise': lambda: self.motion_analyzer.analyze_hand_raise(keypoints, 'right'),
+            'left_hand_raise': lambda: self.motion_analyzer.analyze_hand_raise(keypoints, 'left'),
         }
         
         if motion_type in motion_map:
@@ -382,27 +499,30 @@ class PoseDetector:
         else:
             return ("unknown", 0.0, None)
     
-    def process_media(self, source, output_path: Optional[str] = None, 
-                     show: bool = True, analyze_motions: List[str] = None) -> None:
+    def process_media(self, source, output_path: Optional[str] = None,
+                     show: bool = True, analyze_motions: List[str] = None,
+                     show_points: List[str] = None) -> None:
         """
         Unified function to process any media (image, video, or camera)
-        
+
         Args:
             source: Image path, video path, or camera index (int)
             output_path: Optional path to save output
             show: Whether to display results
             analyze_motions: List of motions to analyze (e.g., ['right_arm_abduction'])
+            show_points: List of keypoint names whose x,y to overlay on frame (max 3)
         """
         # Determine if source is image or video/camera
         is_image = isinstance(source, str) and source.lower().endswith(('.jpg', '.jpeg', '.png', '.bmp', '.webp'))
-        
+
         if is_image:
-            self._process_image(source, output_path, show, analyze_motions)
+            self._process_image(source, output_path, show, analyze_motions, show_points)
         else:
-            self._process_video(source, output_path, show, analyze_motions)
+            self._process_video(source, output_path, show, analyze_motions, show_points)
     
-    def _process_image(self, image_path: str, output_path: Optional[str], 
-                      show: bool, analyze_motions: Optional[List[str]]) -> None:
+    def _process_image(self, image_path: str, output_path: Optional[str],
+                      show: bool, analyze_motions: Optional[List[str]],
+                      show_points: Optional[List[str]] = None) -> None:
         """Process single image"""
         print(f"Processing image: {image_path}")
         
@@ -439,8 +559,9 @@ class PoseDetector:
             cv2.waitKey(0)
             cv2.destroyAllWindows()
     
-    def _process_video(self, video_source, output_path: Optional[str], 
-                      show: bool, analyze_motions: Optional[List[str]]) -> None:
+    def _process_video(self, video_source, output_path: Optional[str],
+                      show: bool, analyze_motions: Optional[List[str]],
+                      show_points: Optional[List[str]] = None) -> None:
         """Process video stream (camera or video file)"""
         # Open video source
         cap = cv2.VideoCapture(video_source)
@@ -484,23 +605,14 @@ class PoseDetector:
                 inference_times.append(inference_time)
                 
                 # Analyze motions and overlay on frame
-                y_offset = 30
-                for person_id, keypoints in enumerate(keypoints_list):
-                    if analyze_motions:
-                        for motion_type in analyze_motions:
-                            action, normalized, angle = self.analyze_motion(keypoints, motion_type)
-                            if DEBUG == True:                            
-                                print(f"Frame {frame_count} - Person {person_id + 1} - {action}: {normalized:.2f} (angle: {angle:.0f}°)" if angle is not None else f"Frame {frame_count} - Person {person_id + 1} - {action}: N/A") 
-                            if angle is not None:
-                                text = f"P{person_id+1} {action}: {normalized:.2f}"
-                                cv2.putText(annotated_frame, text, (10, y_offset),
-                                          cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-                                y_offset += 25
-                
+                _annotate_motions(annotated_frame, keypoints_list, self, analyze_motions, frame_count)
+
+                # Overlay keypoint coordinates
+                if show_points:
+                    _draw_show_points(annotated_frame, keypoints_list, show_points, width, height, frame_count)
+
                 # Add frame info
-                info_text = f"Frame: {frame_count} | Persons: {len(keypoints_list)}"
-                cv2.putText(annotated_frame, info_text, (10, height - 10),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                _add_info_text(annotated_frame, frame_count, len(keypoints_list))
                 
                 # Write frame
                 if writer:
@@ -526,16 +638,7 @@ class PoseDetector:
             cv2.destroyAllWindows()
 
             # Print stats
-            if frame_count > 0:
-                avg_inference = sum(inference_times) / len(inference_times) * 1000
-                avg_processing = sum(processing_times) / len(processing_times) * 1000
-                total_time = sum(processing_times)
-                print(f"\n--- Stats ---")
-                print(f"Frames processed: {frame_count}")
-                print(f"Avg inference:    {avg_inference:.1f} ms/frame")
-                print(f"Avg processing:   {avg_processing:.1f} ms/frame (inference + annotation + I/O)")
-                print(f"Throughput:       {frame_count / total_time:.1f} FPS")
-                print(f"Total time:       {total_time:.2f} s")
+            _print_stats(frame_count, inference_times, processing_times)
 
 class DuplicateDetectionFilter:
     """Removes duplicate person detections based on keypoint similarity"""
@@ -770,7 +873,14 @@ def main():
     parser.add_argument('--no-show', action='store_true',
                        help='Do not display video')
     parser.add_argument('--analyze', type=str, default='',
-                       help='Motions to analyze, e.g., {right_arm_abduction,left_arm_abduction}')
+                       help='Motions to analyze as comma-separated names in braces. '
+                            'Available: right_arm_abduction, left_arm_abduction, '
+                            'right_elbow_flexion, left_elbow_flexion, '
+                            'right_knee_flexion, left_knee_flexion, '
+                            'right_hand_raise, left_hand_raise. '
+                            'Example: {right_arm_abduction,left_hand_raise}')
+    parser.add_argument('--show-points', type=str, default='',
+                       help='Keypoint names to overlay x,y on frame (max 3), e.g., {wrist,thumb_tip,index_tip}')
     parser.add_argument('--device', type=str, default=None,
                        help='Device for inference: cpu, mps, cuda, or cuda:0 (default: auto)')
     parser.add_argument('--keep-duplicates', action='store_true',
@@ -797,11 +907,17 @@ def main():
         cleaned = args.analyze.strip('{}')
         analyze_motions = [m.strip() for m in cleaned.split(',') if m.strip()]
 
+    show_points = None
+    if args.show_points:
+        cleaned = args.show_points.strip('{}')
+        show_points = [p.strip() for p in cleaned.split(',') if p.strip()][:3]
+
     detector.process_media(
         source=source,
         output_path=args.output,
         show=not args.no_show,
-        analyze_motions=analyze_motions
+        analyze_motions=analyze_motions,
+        show_points=show_points
     )
 
 
